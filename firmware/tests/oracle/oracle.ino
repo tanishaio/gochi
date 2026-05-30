@@ -525,14 +525,19 @@ static void jingleWake() {
   static const Note n[] = {{660, 50}, {880, 70}};
   playMelody(n, 2);
 }
-// Bouncy Subway-Surfers-style hook. Plays as the boot theme and as a
-// reward when you shake hard enough (megaShake). 🛹
+// Original arcade-hype chiptune in a fast, bouncy endless-runner spirit
+// (an homage, not a transcription of any copyrighted track). Plays as the
+// boot theme and as the megaShake reward. 🛹
 static void jingleSubway() {
   static const Note n[] = {
-      {659, 130}, {784, 130}, {988, 130}, {784, 130},
-      {880, 130}, {784, 130}, {659, 190}, {0, 70},
-      {587, 130}, {659, 130}, {784, 170}, {988, 130},
-      {880, 130}, {784, 130}, {659, 260},
+      // bouncy hook
+      {659, 110}, {659, 90}, {784, 120}, {880, 150}, {784, 90}, {659, 170}, {0, 50},
+      // answer phrase
+      {587, 110}, {659, 110}, {784, 150}, {659, 100}, {587, 170}, {0, 50},
+      // lift + run-up
+      {880, 110}, {988, 110}, {880, 110}, {784, 140}, {659, 110}, {784, 130},
+      // landing
+      {988, 120}, {1175, 150}, {988, 110}, {784, 110}, {659, 240},
   };
   playMelody(n, sizeof(n) / sizeof(n[0]));
 }
