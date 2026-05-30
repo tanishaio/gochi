@@ -5,13 +5,13 @@
 // answer, and after a suspenseful beat it reveals a verdict with expressive
 // faces, animated dice/cards, and themed buzzer jingles.
 //
-//   side-to-side  → YES / NO        (a rich Magic-8-Ball answer set)
-//   up-and-down   → a NUMBER 1–6     (lands as a rolling die with pips)
-//   twist / spin  → option A / B / C (shuffles in a framed card)
+//   side-to-side  → YES / NO       (a goofy Magic-8-Ball answer set)
+//   up-and-down   → OPTION 1–4      (lands as a rolling die with pips)
+//   shake like crazy → SURF'S UP 🛹 (a Subway-Surfers-style easter egg)
 //
-// "Side-to-side vs up-and-down" is told apart by projecting linear accel
-// onto the live gravity vector, so it works at any resting tilt. A "twist"
-// is rotation *without* translation: high yaw rate but low linear accel.
+// The two gestures are told apart by projecting linear accel onto the live
+// gravity vector (so it works at any resting tilt): vertical-dominant swing
+// = up-and-down (option), otherwise = side-to-side (yes/no).
 //
 // Hardware (all from src/config.h — nothing hard-coded here):
 //   OLED  SSD1306 128x64 on hardware I2C  SDA=GPIO5  SCL=GPIO6  (U8g2)
@@ -52,7 +52,7 @@ struct Note {
   uint16_t ms;
 };
 enum class State : uint8_t { Sleeping, Charging, Thinking, Reveal };
-enum class Mode : uint8_t { YesNo, Number, Letter };
+enum class Mode : uint8_t { YesNo, Option };  // side-to-side / up-down
 
 // One Magic-8-Ball answer. `tone` drives the face + jingle:
 //   +2 emphatic yes, +1 yes, 0 non-committal, -1 no, -2 emphatic no.
@@ -287,9 +287,9 @@ static const uint32_t REVEAL_MS = 4500;       // how long the verdict shows
 static const float EMPHATIC_ENERGY = 10.0f;   // shake energy → emphatic yes/no
 static const float CHARGE_FULL = 14.0f;       // energy that fills the charge bar
 static const uint8_t YESNO_SPLIT = 52;        // <split = yes, slight yes bias
-static const uint8_t NEUTRAL_PCT = 10;        // % "the spirits are unclear"
-static const float TWIST_MIN_DPS = 110.0f;    // yaw rate that counts as a twist
-static const float TWIST_LIN_MAX_G = 0.30f;   // ...only if translation stayed low
+static const uint8_t NEUTRAL_PCT = 12;        // % "the spirits are buffering"
+static const uint8_t OPTION_COUNT = 4;        // up-down picks 1..OPTION_COUNT
+static const float MEGA_ENERGY = 17.0f;       // shake THIS hard → SURF'S UP 🛹
 
 // =====================================================================
 //  Runtime state ========================================================
@@ -307,7 +307,7 @@ static float biasGx = 0, biasGy = 0, biasGz = 0;
 
 // Per-shake accumulators (reset on wake). Peaks discriminate the gesture;
 // shakeEnergy (running sum) drives intensity, the charge bar, and emphasis.
-static float peakVert = 0, peakHoriz = 0, peakTwist = 0;
+static float peakVert = 0, peakHoriz = 0;
 static float shakeEnergy = 0;
 static uint32_t calmSince = 0;
 
@@ -328,28 +328,28 @@ static Mode mode = Mode::YesNo;
 static char verdict[16] = "";
 static char flavor[24] = "";
 static int8_t revealTone = 0;
-static uint8_t dieN = 1;   // for Number mode
-static char cardC = 'A';   // for Letter mode
+static uint8_t dieN = 1;   // for Option mode (1..OPTION_COUNT)
+static bool megaShake = false;  // shook hard enough for the Subway easter egg
 
 // =====================================================================
 //  Magic-8-Ball answer pools ===========================================
 // =====================================================================
 static const Answer YES_STRONG[] = {
-    {"YES!!", "without a doubt", 2}, {"100%", "the stars insist", 2},
-    {"FOR SURE", "go for it", 2},    {"OH YES", "destiny calls", 2}};
+    {"YES!!", "bet the house \\o/", 2}, {"100%", "the universe winked ;)", 2},
+    {"HECK YES", "go go go!!", 2},      {"OBVIOUSLY", "duh, legend 8)", 2}};
 static const Answer YES_SOFT[] = {
-    {"yes", "signs point that way", 1}, {"likely", "odds favour it", 1},
-    {"sure", "why not", 1},             {"yep", "i'd bet on it", 1}};
+    {"yeah", "vibes check out ^_^", 1}, {"sure", "why not lol", 1},
+    {"yep", "i'd risk it :P", 1},       {"likely", "stars say prob yes", 1}};
 static const Answer NEUTRAL[] = {
-    {"HAZY", "ask again later", 0}, {"MAYBE", "the mists swirl", 0},
-    {"HMMM", "try once more", 0},   {"???", "spirits unclear", 0},
-    {"42", "...probably", 0}};
+    {"HMMM", "ask again, napping -_-", 0}, {"DUNNO", "shrug \\_( )_/", 0},
+    {"BUFFERING", "loading fate... :/", 0}, {"42", "answer to everything", 0},
+    {"ASK MOM", "im just a chip lol", 0}};
 static const Answer NO_SOFT[] = {
-    {"no", "don't count on it", -1}, {"unlikely", "i wouldn't", -1},
-    {"nah", "doubt it", -1},         {"meh", "outlook poor", -1}};
+    {"nah", "i wouldn't tbh :/", -1},  {"meh", "outlook = potato", -1},
+    {"nope", "doubt it chief", -1},    {"eh no", "bad vibes >_<", -1}};
 static const Answer NO_STRONG[] = {
-    {"NO WAY", "not a chance", -2},  {"NOPE", "forget it", -2},
-    {"ABSOLUTELY", "...not", -2},    {"DENIED", "the void says no", -2}};
+    {"NO WAY", "not in a million yrs", -2}, {"NOPE", "hard pass X(", -2},
+    {"DENIED", "the void laughs >:)", -2}, {"ABSOLUTELY", "...not. sorry XD", -2}};
 
 template <typename T, size_t N>
 static const Answer& pick(const T (&pool)[N]) {
@@ -421,17 +421,6 @@ static void drawDie(int cx, int cy, int half, uint8_t n) {
   }
 }
 
-// A big letter inside a decorative rounded card.
-static void drawCard(int cx, int cy, char c) {
-  oled.drawRFrame(cx - 26, cy - 26, 52, 52, 6);
-  oled.drawRFrame(cx - 23, cy - 23, 46, 46, 4);
-  char s[2] = {c, '\0'};
-  oled.setFont(u8g2_font_ncenB24_tr);
-  oled.setFontPosCenter();
-  oled.drawStr(cx - oled.getStrWidth(s) / 2, cy, s);
-  oled.setFontPosBaseline();
-}
-
 // =====================================================================
 //  Faces / animations ===================================================
 // =====================================================================
@@ -455,8 +444,10 @@ static void faceSleeping(uint32_t now) {
     oled.drawDisc(96, cy - 14 - phase / 8, 2);
     oled.drawDisc(102, cy - 22 - phase / 8, 1);
   }
-  // Hint alternates so it reads as a sleepy pet you can wake.
-  drawCenteredSmall(((now / 1600) % 2) ? "z z z" : "shake me", OLED_H - 4);
+  // Hint cycles through sleepy one-liners so it reads as a bored pet.
+  static const char* HINTS[] = {"z z z", "shake me!", "im bored...",
+                                "feed me chaos", "boop me", "(-_-) zzz"};
+  drawCenteredSmall(HINTS[(now / 1600) % 6], OLED_H - 4);
   oled.sendBuffer();
 }
 
@@ -497,20 +488,19 @@ static void faceThinking(uint32_t now) {
     int d = (i == lead) ? 4 : ((i == (lead + 11) % 12) ? 3 : 1);
     oled.drawDisc(x, y, d);
   }
-  drawCenteredSmall("consulting the void", OLED_H - 3);
+  static const char* MUSE[] = {"consulting the void", "asking the wifi...",
+                               "bribing fate", "shaking my 8-ball",
+                               "googling it", "channeling spirits"};
+  drawCenteredSmall(MUSE[(now / 600) % 6], OLED_H - 3);
   oled.sendBuffer();
 }
 
 // Steady reveal frame (the entrance zoom is handled by playReveal()).
-static void drawReveal(uint32_t now) {
+static void drawReveal() {
   oled.clearBuffer();
   switch (mode) {
-    case Mode::Number:
+    case Mode::Option:
       drawDie(OLED_W / 2, 26, 20, dieN);
-      drawCenteredSmall(flavor, OLED_H - 3);
-      break;
-    case Mode::Letter:
-      drawCard(OLED_W / 2, 28, cardC);
       drawCenteredSmall(flavor, OLED_H - 3);
       break;
     case Mode::YesNo: {
@@ -534,6 +524,17 @@ static void drawReveal(uint32_t now) {
 static void jingleWake() {
   static const Note n[] = {{660, 50}, {880, 70}};
   playMelody(n, 2);
+}
+// Bouncy Subway-Surfers-style hook. Plays as the boot theme and as a
+// reward when you shake hard enough (megaShake). 🛹
+static void jingleSubway() {
+  static const Note n[] = {
+      {659, 130}, {784, 130}, {988, 130}, {784, 130},
+      {880, 130}, {784, 130}, {659, 190}, {0, 70},
+      {587, 130}, {659, 130}, {784, 170}, {988, 130},
+      {880, 130}, {784, 130}, {659, 260},
+  };
+  playMelody(n, sizeof(n) / sizeof(n[0]));
 }
 static void jingleByTone(int8_t tone) {
   switch (tone) {
@@ -568,33 +569,20 @@ static void jingleByTone(int8_t tone) {
 // =====================================================================
 //  Reveal entrance animations ==========================================
 // =====================================================================
-static void animateNumber() {
-  // A rolling die that decelerates, with a blip per tumble, then lands.
+static void animateOption() {
+  // A rolling die (1..OPTION_COUNT) that decelerates with a blip per
+  // tumble, then lands on the chosen option.
   uint16_t step = 40;
   for (uint8_t i = 0; i < 14; ++i) {
-    uint8_t face = 1 + rngBelow(6);
+    uint8_t face = 1 + rngBelow(OPTION_COUNT);
     oled.clearBuffer();
     drawDie(OLED_W / 2, 26, 20, face);
-    drawCenteredSmall("rolling...", OLED_H - 3);
+    drawCenteredSmall("rolling the dice...", OLED_H - 3);
     oled.sendBuffer();
     buzz(900 + face * 60);
     delay(step);
     silence();
     step += 12;  // decelerate
-  }
-}
-static void animateLetter() {
-  uint16_t step = 50;
-  const char seq[] = {'A', 'B', 'C'};
-  for (uint8_t i = 0; i < 12; ++i) {
-    oled.clearBuffer();
-    drawCard(OLED_W / 2, 28, seq[rngBelow(3)]);
-    drawCenteredSmall("shuffling...", OLED_H - 3);
-    oled.sendBuffer();
-    buzz(700 + (i % 3) * 120);
-    delay(step);
-    silence();
-    step += 12;
   }
 }
 static void animateWordPop() {
@@ -620,14 +608,11 @@ static void classifyAndDecide() {
   rngState ^= micros() * 2654435761u;
   if (rngState == 0) rngState = 0xA5A5A5A5u;
 
-  float linPeak = (peakVert > peakHoriz) ? peakVert : peakHoriz;
-  if (linPeak < TWIST_LIN_MAX_G && peakTwist > TWIST_MIN_DPS) {
-    mode = Mode::Letter;
-  } else if (peakVert > peakHoriz) {
-    mode = Mode::Number;
-  } else {
-    mode = Mode::YesNo;
-  }
+  megaShake = shakeEnergy > MEGA_ENERGY;
+
+  // Two gestures only: up-and-down (vertical accel dominates) = pick an
+  // option 1..4; anything else = a yes/no shake.
+  mode = (peakVert > peakHoriz) ? Mode::Option : Mode::YesNo;
 
   flavor[0] = '\0';
   switch (mode) {
@@ -646,17 +631,12 @@ static void classifyAndDecide() {
       revealTone = a->tone;
       break;
     }
-    case Mode::Number: {
-      dieN = 1 + rngBelow(6);
+    case Mode::Option: {
+      dieN = 1 + rngBelow(OPTION_COUNT);
+      static const char* QUIPS[] = {"go with option %u", "option %u, trust me 8)",
+                                    "the dice gods say %u", "lucky number %u ^_^"};
       snprintf(verdict, sizeof(verdict), "%u", dieN);
-      snprintf(flavor, sizeof(flavor), "the dice decree %u", dieN);
-      revealTone = 1;
-      break;
-    }
-    case Mode::Letter: {
-      cardC = (char)('A' + rngBelow(3));
-      snprintf(verdict, sizeof(verdict), "%c", cardC);
-      snprintf(flavor, sizeof(flavor), "the path is %c", cardC);
+      snprintf(flavor, sizeof(flavor), QUIPS[rngBelow(4)], dieN);
       revealTone = 1;
       break;
     }
@@ -664,12 +644,18 @@ static void classifyAndDecide() {
 }
 
 static void playReveal() {
-  switch (mode) {
-    case Mode::Number: animateNumber(); break;
-    case Mode::Letter: animateLetter(); break;
-    case Mode::YesNo: animateWordPop(); break;
-  }
+  if (mode == Mode::Option) animateOption();
+  else animateWordPop();
   jingleByTone(revealTone);
+
+  // Easter egg: if you shook like your life depended on it, SURF'S UP. 🛹
+  if (megaShake) {
+    oled.clearBuffer();
+    drawWord("SURF'S UP", 38);
+    drawCenteredSmall("\\o/ you went HAM \\o/", OLED_H - 4);
+    oled.sendBuffer();
+    jingleSubway();
+  }
 }
 
 // =====================================================================
@@ -680,9 +666,10 @@ static void enter(State s, uint32_t now) {
   stateSince = now;
 }
 static void resetShake() {
-  peakVert = peakHoriz = peakTwist = 0;
+  peakVert = peakHoriz = 0;
   shakeEnergy = 0;
   calmSince = 0;
+  megaShake = false;
 }
 
 void setup() {
@@ -692,25 +679,26 @@ void setup() {
   oled.setBusClock(400000);
   oled.begin();
   oled.clearBuffer();
-  drawWord("Oracle", 38);
-  drawCenteredSmall("awaken the spirits", OLED_H - 4);
+  drawWord("ORACLE", 36);
+  drawCenteredSmall("wake the spirits o_O", OLED_H - 4);
   oled.sendBuffer();
 
   ledcAttach(PIN_BUZZER, 2000, 10);
   silence();
 
-  Serial.println("oracle: booting");
+  Serial.println("🔮 oracle: booting...");
   if (!mpu::begin()) {
-    Serial.println("oracle: MPU not found — check SDA=GPIO7 / SCL=GPIO8 / VCC / GND");
+    Serial.println("💀 oracle: MPU not found — check SDA=GPIO7 / SCL=GPIO8 / VCC / GND");
     oled.clearBuffer();
-    drawCenteredSmall("no MPU on GPIO7/8", 28);
+    drawCenteredSmall("no MPU on GPIO7/8 :(", 28);
     drawCenteredSmall("check wiring", 44);
     oled.sendBuffer();
     while (true) delay(1000);
   }
-  Serial.printf("oracle: MPU @ 0x%02X — ready. shake to divine.\n", mpu::address());
-  jingleWake();
-  delay(500);
+  Serial.printf("🔮 oracle: MPU @ 0x%02X — ready!\n", mpu::address());
+  Serial.println("   side-to-side = yes/no 🎱   up-down = option 1-4 🎲   shake HARD = 🛹");
+  jingleSubway();  // boot theme 🛹
+  delay(300);
   enter(State::Sleeping, millis());
 }
 
@@ -774,10 +762,8 @@ void loop() {
       float vLin = lx * ux + ly * uy + lz * uz;
       float hx = lx - vLin * ux, hy = ly - vLin * uy, hz = lz - vLin * uz;
       float hLin = sqrtf(hx * hx + hy * hy + hz * hz);
-      float twist = fabsf(cgx * ux + cgy * uy + cgz * uz);
       if (fabsf(vLin) > peakVert) peakVert = fabsf(vLin);
       if (hLin > peakHoriz) peakHoriz = hLin;
-      if (twist > peakTwist) peakTwist = twist;
 
       float intensity = linMag / 1.2f;
       if (intensity > 1.0f) intensity = 1.0f;
@@ -792,9 +778,10 @@ void loop() {
           silence();
           classifyAndDecide();
           thinkDuration = THINK_MIN_MS + (rng() % THINK_RAND_MS);
-          Serial.printf("oracle: mode=%d verdict=%s | vert=%.2f horiz=%.2f twist=%.0f energy=%.1f\n",
-                        (int)mode, verdict, (double)peakVert, (double)peakHoriz,
-                        (double)peakTwist, (double)shakeEnergy);
+          Serial.printf("oracle: %s verdict=%s | vert=%.2f horiz=%.2f energy=%.1f%s\n",
+                        mode == Mode::Option ? "OPTION(up-down)" : "YES/NO(side)",
+                        verdict, (double)peakVert, (double)peakHoriz,
+                        (double)shakeEnergy, megaShake ? " [MEGA!]" : "");
           enter(State::Thinking, now);
         }
       } else {
@@ -819,7 +806,7 @@ void loop() {
       break;
     }
     case State::Reveal: {
-      drawReveal(now);
+      drawReveal();
       if (now - stateSince >= REVEAL_MS) {
         gSeeded = false;  // re-seed gravity for the next round
         enter(State::Sleeping, now);
