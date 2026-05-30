@@ -268,9 +268,16 @@ static const float CALM_LIN_G = 0.18f;      // below this = "shaking stopped"
 static const uint32_t CALM_HOLD_MS = 380;   // calm must persist this long
 static const uint32_t THINK_MS = 1300;      // suspense beat before reveal
 static const uint32_t REVEAL_MS = 4000;     // how long the verdict shows
-static const float EMPHATIC_ENERGY = 22.0f; // shake energy → emphatic yes/no
+static const float EMPHATIC_ENERGY = 10.0f; // shake energy → emphatic yes/no
 static const uint8_t YESNO_SPLIT = 53;      // <split = yes, slight yes bias
 static const uint8_t ASK_AGAIN_PCT = 6;     // % chance of a cop-out reply
+
+// Gesture split. A twist is *rotation without translation*: high yaw rate
+// about the vertical axis while linear accel stays low. Any real shake
+// (up-down / side-to-side) has high linear accel and is classified by
+// which axis dominates instead. Tune these two if twist mis-fires.
+static const float TWIST_MIN_DPS = 110.0f;   // yaw rate that counts as a twist
+static const float TWIST_LIN_MAX_G = 0.30f;  // ...but only if translation stayed below this
 
 // --- Runtime state ----------------------------------------------------
 static State state = State::Sleeping;
@@ -282,10 +289,12 @@ static float gX = 0, gY = 0, gZ = 1;
 static bool gSeeded = false;
 static const float GRAVITY_ALPHA = 0.02f;
 
-// Per-shake accumulators (reset on wake).
-static float energyX = 0, energyY = 0, energyZ = 0;  // Σ|linear accel| per axis
-static float energyGyro = 0;                         // Σ|gyro|
-static float shakeEnergy = 0;                        // Σ|linear| total (intensity)
+// Per-shake accumulators (reset on wake). Peaks discriminate the gesture;
+// shakeEnergy (running sum) drives intensity + the emphatic cutoff.
+static float peakVert = 0;   // max |linear accel| along gravity axis (g)
+static float peakHoriz = 0;  // max |linear accel| perpendicular to it (g)
+static float peakTwist = 0;  // max yaw rate about the gravity axis (°/s)
+static float shakeEnergy = 0;
 static uint32_t calmSince = 0;
 
 // xorshift32 PRNG, seeded from gyro/timing entropy at wake.
@@ -394,25 +403,19 @@ static void jingleNeutral() {  // for numbers / letters / ask-again
 //  Mode classification + verdict selection
 // =====================================================================
 static void classifyAndDecide() {
-  // Which axis is vertical right now? The one with the largest gravity
-  // component. Up-and-down shakes dump their energy onto that axis.
-  float agx = fabsf(gX), agy = fabsf(gY), agz = fabsf(gZ);
-  int vertAxis = 0;  // 0=x 1=y 2=z
-  if (agy >= agx && agy >= agz) vertAxis = 1;
-  else if (agz >= agx && agz >= agy) vertAxis = 2;
+  // Fold fresh timing entropy into the PRNG so verdicts vary even when
+  // two shakes happen to seed it similarly.
+  rngState ^= micros() * 2654435761u;
+  if (rngState == 0) rngState = 0xA5A5A5A5u;
 
-  float vertEnergy = (vertAxis == 0) ? energyX : (vertAxis == 1) ? energyY : energyZ;
-  float horizEnergy = (energyX + energyY + energyZ) - vertEnergy;
-
-  // Rotation-dominant motion (a twist/spin) shows up far more in the
-  // gyro than in linear accel. Scale gyro down (°/s are large numbers)
-  // before comparing against the linear-accel energy.
-  float rotScore = energyGyro * 0.02f;
-  float linScore = energyX + energyY + energyZ;
-
-  if (rotScore > linScore * 0.9f) {
+  // Twist = lots of yaw spin but little translation. A shake always
+  // rotates the wrist, so we only call it a twist when the linear-accel
+  // peak stayed low. Otherwise it's a shake: up-down vs side-to-side by
+  // which projected axis saw the bigger swing.
+  float linPeak = (peakVert > peakHoriz) ? peakVert : peakHoriz;
+  if (linPeak < TWIST_LIN_MAX_G && peakTwist > TWIST_MIN_DPS) {
     mode = Mode::Letter;
-  } else if (vertEnergy > horizEnergy) {
+  } else if (peakVert > peakHoriz) {
     mode = Mode::Number;
   } else {
     mode = Mode::YesNo;
@@ -473,8 +476,7 @@ static void enter(State s, uint32_t now) {
 }
 
 static void resetShake() {
-  energyX = energyY = energyZ = 0;
-  energyGyro = 0;
+  peakVert = peakHoriz = peakTwist = 0;
   shakeEnergy = 0;
   calmSince = 0;
 }
@@ -559,12 +561,23 @@ void loop() {
       break;
     }
     case State::Charging: {
-      // Accumulate per-axis energy + intensity; rising buzzer pitch.
-      energyX += fabsf(lx);
-      energyY += fabsf(ly);
-      energyZ += fabsf(lz);
-      energyGyro += gyroMag;
       shakeEnergy += linMag;
+
+      // Project linear accel onto the gravity axis: vLin is up-down
+      // translation, hLin is side-to-side. twist is yaw rate about that
+      // same axis. Track the peak of each — peaks separate the gestures
+      // far more cleanly than running sums (which all blur together).
+      float gmag = sqrtf(gX * gX + gY * gY + gZ * gZ);
+      if (gmag < 1e-3f) gmag = 1.0f;
+      float ux = gX / gmag, uy = gY / gmag, uz = gZ / gmag;
+      float vLin = lx * ux + ly * uy + lz * uz;
+      float hx = lx - vLin * ux, hy = ly - vLin * uy, hz = lz - vLin * uz;
+      float hLin = sqrtf(hx * hx + hy * hy + hz * hz);
+      float twist = fabsf(s.gx * ux + s.gy * uy + s.gz * uz);
+      if (fabsf(vLin) > peakVert) peakVert = fabsf(vLin);
+      if (hLin > peakHoriz) peakHoriz = hLin;
+      if (twist > peakTwist) peakTwist = twist;
+
       float intensity = linMag / 1.2f;
       if (intensity > 1.0f) intensity = 1.0f;
       faceCharging(now, intensity);
@@ -575,8 +588,9 @@ void loop() {
         if (now - calmSince >= CALM_HOLD_MS) {
           silence();
           classifyAndDecide();
-          Serial.printf("oracle: decided mode=%d verdict=%s energy=%.1f\n",
-                        (int)mode, verdict, shakeEnergy);
+          Serial.printf("oracle: decided mode=%d verdict=%s | vert=%.2f horiz=%.2f twist=%.0f energy=%.1f\n",
+                        (int)mode, verdict, (double)peakVert, (double)peakHoriz,
+                        (double)peakTwist, (double)shakeEnergy);
           enter(State::Thinking, now);
         }
       } else {
