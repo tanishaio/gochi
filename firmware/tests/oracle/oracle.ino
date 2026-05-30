@@ -533,6 +533,17 @@ void loop() {
   float linMag = sqrtf(lx * lx + ly * ly + lz * lz);
   float gyroMag = sqrtf(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz);
 
+  // Live readout (~4 Hz) so you can watch motion values on `make monitor`.
+  // If lin/gyro never move when you shake, the MPU isn't reading; if they
+  // spike past wake= but state stays 0, lower WAKE_LIN_G.
+  static uint32_t lastLog = 0;
+  if (now - lastLog >= 250) {
+    lastLog = now;
+    Serial.printf("ORACLE state=%d acc=(%.2f,%.2f,%.2f) lin=%.3f gyro=%.1f wake=%.2f\n",
+                  (int)state, (double)s.ax, (double)s.ay, (double)s.az,
+                  (double)linMag, (double)gyroMag, (double)WAKE_LIN_G);
+  }
+
   switch (state) {
     case State::Sleeping: {
       faceSleeping(now);
