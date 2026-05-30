@@ -50,6 +50,18 @@ static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, PIN_SCL,
 #endif
 
 // =====================================================================
+//  Types — declared up front. The Arduino .ino preprocessor injects
+//  auto-generated function prototypes *above the first function*, so any
+//  type named in a function signature must already be visible here.
+// =====================================================================
+struct Note {
+  uint16_t freq;
+  uint16_t ms;
+};
+enum class State : uint8_t { Sleeping, Charging, Thinking, Reveal };
+enum class Mode : uint8_t { YesNo, Number, Letter };
+
+// =====================================================================
 //  MPU-6050 — bit-banged I2C driver (inline copy of src/imu/mpu6050.cpp,
 //  trimmed to begin()/read()). Toggles pinMode on PIN_MPU_SDA/SCL; never
 //  touches Wire, so it coexists with the OLED's hardware I2C.
@@ -239,10 +251,6 @@ bool read(Sample& out) {
 static void buzz(uint16_t freq) { ledcWriteTone(PIN_BUZZER, freq); }
 static void silence() { ledcWriteTone(PIN_BUZZER, 0); }
 
-struct Note {
-  uint16_t freq;
-  uint16_t ms;
-};
 static void playMelody(const Note* notes, uint8_t n) {
   for (uint8_t i = 0; i < n; ++i) {
     buzz(notes[i].freq);
@@ -254,9 +262,6 @@ static void playMelody(const Note* notes, uint8_t n) {
 // =====================================================================
 //  Oracle state machine
 // =====================================================================
-enum class State : uint8_t { Sleeping, Charging, Thinking, Reveal };
-enum class Mode : uint8_t { YesNo, Number, Letter };
-
 // --- Tuning dials -----------------------------------------------------
 static const float WAKE_LIN_G = 0.45f;      // kinetic accel that wakes it
 static const float CALM_LIN_G = 0.18f;      // below this = "shaking stopped"
@@ -490,7 +495,7 @@ void setup() {
   silence();
 
   Serial.println("oracle: booting");
-  if (!mpu.begin()) {
+  if (!mpu::begin()) {
     Serial.println("oracle: MPU not found — check SDA=GPIO7 / SCL=GPIO8 / VCC / GND");
     oled.clearBuffer();
     oled.setFont(u8g2_font_ncenB08_tr);
@@ -511,7 +516,7 @@ void loop() {
   lastSample = now;
 
   mpu::Sample s;
-  if (!mpu.read(s)) return;
+  if (!mpu::read(s)) return;
 
   // Track gravity, derive linear (kinetic) accel — orientation-robust.
   if (!gSeeded) {
