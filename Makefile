@@ -168,8 +168,16 @@ test-mpu:
 ## test-oracle    — compile + flash the standalone shake-to-divine oracle.
 ##                  Self-contained: OLED + buzzer + bit-banged MPU, no host
 ##                  daemon. Replaces the gochi firmware on the board until
-##                  you re-flash with `make flash`. If `gochi` holds the
-##                  port, the upload pauses it first (same dance as upload).
+##                  you re-flash with `make flash`. Pauses the gochi daemon
+##                  for the upload and hands the port back after (same dance
+##                  as `make upload`), so a running daemon won't block it.
 test-oracle:
 	$(ARDUINO) compile --fqbn $(FQBN) $(BUILD_PROPS) --build-path firmware/tests/oracle/build firmware/tests/oracle
-	$(ARDUINO) upload  --fqbn $(FQBN) --port $(PORT) --input-dir firmware/tests/oracle/build firmware/tests/oracle
+	@_paused=0; \
+	if command -v gochi >/dev/null 2>&1 && launchctl list com.tamagotchi.daemon >/dev/null 2>&1; then \
+	  _paused=1; \
+	  echo "→ gochi stop (releasing serial port)"; \
+	  gochi stop >/dev/null; \
+	fi; \
+	trap '[ "$$_paused" = 1 ] && echo "→ gochi start (reacquiring)" && gochi start >/dev/null' EXIT; \
+	$(ARDUINO) upload --fqbn $(FQBN) --port $(PORT) --input-dir firmware/tests/oracle/build firmware/tests/oracle
