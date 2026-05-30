@@ -53,7 +53,7 @@ endif
 BUILD_PROPS := $(if $(strip $(EXTRA_DEFINES)),--build-property "build.extra_flags=$(EXTRA_DEFINES)",)
 
 .PHONY: build db flash upload erase monitor flash-monitor ports format format-check clean
-.PHONY: test-led test-oled test-buzzer test-mpu
+.PHONY: test-led test-oled test-buzzer test-mpu test-oracle
 
 ## build         — compile the sketch
 build:
@@ -164,3 +164,12 @@ test-mpu:
 	$(ARDUINO) compile --fqbn $(FQBN) $(BUILD_PROPS) --build-path firmware/tests/mpu/build firmware/tests/mpu
 	$(ARDUINO) upload  --fqbn $(FQBN) --port $(PORT) --input-dir firmware/tests/mpu/build firmware/tests/mpu
 	@$(OPEN) firmware/tests/mpu/visualize.html
+
+## test-oracle    — compile + flash the standalone shake-to-divine oracle.
+##                  Self-contained: OLED + buzzer + bit-banged MPU, no host
+##                  daemon. Replaces the gochi firmware on the board until
+##                  you re-flash with `make flash`. If `gochi` holds the
+##                  port, the upload pauses it first (same dance as upload).
+test-oracle:
+	$(ARDUINO) compile --fqbn $(FQBN) $(BUILD_PROPS) --build-path firmware/tests/oracle/build firmware/tests/oracle
+	$(ARDUINO) upload  --fqbn $(FQBN) --port $(PORT) --input-dir firmware/tests/oracle/build firmware/tests/oracle
